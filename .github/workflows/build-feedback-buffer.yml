@@ -19,7 +19,6 @@ jobs:
 
       - name: Select Xcode
         run: |
-          # Use whatever Xcode is available on the runner
           xcodebuild -version
           xcrun --show-sdk-path
 
@@ -27,14 +26,11 @@ jobs:
         id: deps
         run: nix build -L .#deps && echo "deps=$(readlink ./result)" >> $GITHUB_OUTPUT
 
-      - name: Build GhosttyKit
-        run: nix develop -c zig build --system ${{ steps.deps.outputs.deps }} -Demit-macos-app=false
-
-      - name: Build Ghostty.app
-        run: cd macos && xcodebuild -target Ghostty -configuration Debug
+      - name: Build Ghostty.app via Zig
+        run: nix develop -c zig build --system ${{ steps.deps.outputs.deps }}
 
       - name: Upload Ghostty.app
         uses: actions/upload-artifact@v4
         with:
           name: Ghostty-feedback-buffer
-          path: macos/build/Debug/Ghostty.app
+          path: zig-out/Ghostty.app
