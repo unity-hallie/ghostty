@@ -1,0 +1,40 @@
+name: Build Feedback Buffer Branch
+
+on:
+  push:
+    branches: [feature/feedback-buffer]
+  workflow_dispatch:
+
+jobs:
+  build-macos:
+    runs-on: macos-15
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Install Nix
+        uses: DeterminateSystems/nix-installer-action@main
+        with:
+          determinate: true
+
+      - name: Select Xcode
+        run: |
+          # Use whatever Xcode is available on the runner
+          xcodebuild -version
+          xcrun --show-sdk-path
+
+      - name: Get Zig deps via Nix
+        id: deps
+        run: nix build -L .#deps && echo "deps=$(readlink ./result)" >> $GITHUB_OUTPUT
+
+      - name: Build GhosttyKit
+        run: nix develop -c zig build --system ${{ steps.deps.outputs.deps }} -Demit-macos-app=false
+
+      - name: Build Ghostty.app
+        run: cd macos && xcodebuild -target Ghostty -configuration Debug
+
+      - name: Upload Ghostty.app
+        uses: actions/upload-artifact@v4
+        with:
+          name: Ghostty-feedback-buffer
+          path: macos/build/Debug/Ghostty.app
