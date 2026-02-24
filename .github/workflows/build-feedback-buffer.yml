@@ -21,24 +21,15 @@ jobs:
         id: deps
         run: nix build -L .#deps && echo "deps=$(readlink ./result)" >> $GITHUB_OUTPUT
 
-      # Build GhosttyKit framework + CLI binary (no Xcode 26 needed)
+      # Build everything Zig can build (no native macOS app)
       - name: Build GhosttyKit
         run: nix develop -c zig build --system ${{ steps.deps.outputs.deps }} -Demit-macos-app=false
 
-      - name: Package artifacts
-        run: |
-          mkdir -p artifact
-          # Copy the CLI binary
-          cp zig-out/bin/ghostty artifact/ 2>/dev/null || true
-          # Copy the framework
-          cp -R zig-out/lib/GhosttyKit.framework artifact/ 2>/dev/null || true
-          # Copy resources (shell integration, themes, etc)
-          cp -R zig-out/share artifact/ 2>/dev/null || true
-          # List what we got
-          find artifact -type f | head -50
+      - name: List zig-out contents
+        run: find zig-out -type f -o -type l | sort
 
-      - name: Upload build artifacts
+      - name: Upload entire zig-out
         uses: actions/upload-artifact@v4
         with:
           name: Ghostty-feedback-buffer
-          path: artifact/
+          path: zig-out/
