@@ -163,16 +163,13 @@ pub fn loadComputeMsl(
     const file = cwd.openFile(compute_path, .{}) catch |err| return err;
     defer file.close();
 
-    const src = try file.readToEndAllocOptions(
-        alloc_gpa,
-        4 * 1024 * 1024, // 4MB
-        null,
-        @alignOf(u8),
-        0, // null terminator
-    );
+    const src = try file.readToEndAlloc(alloc_gpa, 4 * 1024 * 1024);
+    // Append null terminator. We own this allocation so we can realloc.
+    const srcZ = try alloc_gpa.realloc(src, src.len + 1);
+    srcZ[src.len] = 0;
 
     log.info("loaded compute shader path={s}", .{compute_path});
-    return src[0 .. src.len - 1 :0];
+    return srcZ[0..src.len :0];
 }
 
 /// Convert a ShaderToy shader into valid GLSL.
