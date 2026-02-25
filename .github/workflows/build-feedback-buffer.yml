@@ -7,7 +7,7 @@ on:
 
 jobs:
   build-macos:
-    runs-on: macos-15
+    runs-on: macos-26
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
@@ -17,19 +17,25 @@ jobs:
         with:
           determinate: true
 
+      - name: Select Xcode 26
+        run: |
+          sudo xcode-select -s /Applications/Xcode_26.2.app || sudo xcode-select -s /Applications/Xcode_26.app
+          xcodebuild -version
+
       - name: Get Zig deps via Nix
         id: deps
         run: nix build -L .#deps && echo "deps=$(readlink ./result)" >> $GITHUB_OUTPUT
 
-      # Build everything Zig can build (no native macOS app)
+      # Build GhosttyKit framework via Zig
       - name: Build GhosttyKit
         run: nix develop -c zig build --system ${{ steps.deps.outputs.deps }} -Demit-macos-app=false
 
-      - name: List zig-out contents
-        run: find zig-out -type f -o -type l | sort
+      # Build the native macOS app via Xcode (MUST be outside Nix env)
+      - name: Build Ghostty.app
+        run: cd macos && xcodebuild -target Ghostty -configuration Debug
 
-      - name: Upload entire zig-out
+      - name: Upload Ghostty.app
         uses: actions/upload-artifact@v4
         with:
           name: Ghostty-feedback-buffer
-          path: zig-out/
+          path: macos/build/Debug/Ghostty.app
