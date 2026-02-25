@@ -10,6 +10,7 @@ const Renderer = @import("../generic.zig").Renderer(Metal);
 const Metal = @import("../Metal.zig");
 const Target = @import("Target.zig");
 const Texture = @import("Texture.zig");
+const ComputePipeline = @import("ComputePipeline.zig");
 const RenderPass = @import("RenderPass.zig");
 
 const Health = @import("../../renderer.zig").Health;
@@ -101,6 +102,65 @@ pub inline fn renderPass(
         .attachments = attachments,
         .command_buffer = self.buffer,
     });
+}
+
+/// Dispatch a compute kernel to update simulation state textures.
+/// Must be called BEFORE any render passes that read the state_write texture.
+///
+/// The compute kernel reads from `textures_read` (bound at indices 0,1,2,...)
+/// and writes to `state_write` (bound at index 8, as a write-capable texture).
+/// Metal's default hazard tracking ensures the subsequent render pass sees
+/// the completed compute writes without manual barriers.
+pub const ComputeArgs = struct {
+    pipeline: ComputePipeline,
+    /// Read-only textures bound at Metal indices 0, 1, 2, ...
+    textures_read: []const ?Texture,
+    /// The single write-only state texture, bound at index 8.
+    state_write: Texture,
+    /// Dispatch dimensions in pixels.
+    width: usize,
+    height: usize,
+};
+
+pub inline fn computePass(self: *const Self, args: ComputeArgs) void {
+    const encoder = self.buffer.msgSend(
+        objc.Object,
+        objc.sel("computeCommandEncoder"),
+        .{},
+    );
+    defer encoder.msgSend(void, objc.sel("endEncoding"), .{});
+
+    encoder.msgSend(void, objc.sel("setComputePipelineState:"), .{args.pipeline.state.value});
+
+    // Bind read textures at their natural indices (0 = iChannel0, 2 = iChannel1, etc.)
+    for (args.textures_read, 0..) |maybe_tex, i| {
+        if (maybe_tex) |tex| {
+            encoder.msgSend(void, objc.sel("setTexture:atIndex:"), .{
+                tex.texture.value,
+                @as(c_ulong, i),
+            });
+        }
+    }
+
+    // Bind the writable state texture at index 8 (well above any sampled inputs).
+    encoder.msgSend(void, objc.sel("setTexture:atIndex:"), .{
+        args.state_write.texture.value,
+        @as(c_ulong, 8),
+    });
+
+    // Dispatch: cover every pixel with 16×16 threadgroups.
+    const tw = args.pipeline.threadgroup_width;
+    const th = args.pipeline.threadgroup_height;
+    const threads_per_group = mtl.MTLSize{ .width = tw, .height = th, .depth = 1 };
+    const threadgroups = mtl.MTLSize{
+        .width  = (args.width  + tw - 1) / tw,
+        .height = (args.height + th - 1) / th,
+        .depth  = 1,
+    };
+    encoder.msgSend(void,
+        objc.sel("dispatchThreadgroups:threadsPerThreadgroup:"),
+        .{ threadgroups, threads_per_group },
+    );
 }
 
 /// Copy the contents of the display target to a texture using a blit

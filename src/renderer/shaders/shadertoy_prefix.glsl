@@ -27,12 +27,9 @@ layout(binding = 1, std140) uniform Globals {
     uniform vec3  iSelectionBackgroundColor;
 };
 
-layout(binding = 0) uniform sampler2D iChannel0;
-layout(binding = 2) uniform sampler2D iChannel1;
-
-// These are unused currently by Ghostty:
-// layout(binding = 3) uniform sampler2D iChannel2;
-// layout(binding = 4) uniform sampler2D iChannel3;
+layout(binding = 0) uniform sampler2D iChannel0;  // current terminal frame
+layout(binding = 2) uniform sampler2D iChannel1;  // previous composite frame (display feedback)
+layout(binding = 3) uniform sampler2D iChannel2;  // compute state (rgba16f, updated by compute kernel)
 
 layout(location = 0) in vec4 gl_FragCoord;
 layout(location = 0) out vec4 _fragColor;

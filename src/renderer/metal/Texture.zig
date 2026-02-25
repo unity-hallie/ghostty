@@ -197,6 +197,6 @@ fn bppOf(pixel_format: mtl.MTLPixelFormat) usize {
         .rgba32uint,
         .rgba32sint,
         .rgba32float,
-        => 128,
+        => 16,
     };
 }

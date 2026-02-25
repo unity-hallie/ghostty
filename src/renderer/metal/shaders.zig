@@ -6,6 +6,7 @@ const math = @import("../../math.zig");
 
 const mtl = @import("api.zig");
 const Pipeline = @import("Pipeline.zig");
+const ComputePipeline = @import("ComputePipeline.zig");
 
 const log = std.log.scoped(.metal);
 
@@ -106,6 +107,11 @@ pub const Shaders = struct {
     /// against the output of the previous shader.
     post_pipelines: []const Pipeline,
 
+    /// Optional compute pipeline for updating state textures each frame
+    /// before the render pass. Null if the user has not provided a compute
+    /// shader alongside their fragment shader.
+    compute_pipeline: ?ComputePipeline = null,
+
     /// Set to true when deinited, if you try to deinit a defunct set
     /// of shaders it will just be ignored, to prevent double-free.
     defunct: bool = false,
@@ -115,11 +121,15 @@ pub const Shaders = struct {
     /// "post_shaders" is an optional list of postprocess shaders to run
     /// against the final drawable texture. This is an array of shader source
     /// code, not file paths.
+    ///
+    /// "compute_shader" is optional MSL source for a compute kernel that
+    /// runs before the render pass to update simulation state textures.
     pub fn init(
         alloc: Allocator,
         device: objc.Object,
         post_shaders: []const [:0]const u8,
         pixel_format: mtl.MTLPixelFormat,
+        compute_shader: ?[:0]const u8,
     ) !Shaders {
         const library = try initLibrary(device);
         errdefer library.msgSend(void, objc.sel("release"), .{});
@@ -161,10 +171,19 @@ pub const Shaders = struct {
             alloc.free(post_pipelines);
         };
 
+        const compute_pipeline: ?ComputePipeline = if (compute_shader) |src|
+            initComputePipeline(device, src) catch |err| cp: {
+                log.warn("error initializing compute pipeline err={}", .{err});
+                break :cp null;
+            }
+        else
+            null;
+
         return .{
             .library = library,
             .pipelines = pipelines,
             .post_pipelines = post_pipelines,
+            .compute_pipeline = compute_pipeline,
         };
     }
 
@@ -185,6 +204,9 @@ pub const Shaders = struct {
             }
             alloc.free(self.post_pipelines);
         }
+
+        // Release compute pipeline if we have one
+        if (self.compute_pipeline) |*cp| cp.deinit();
     }
 };
 
@@ -440,6 +462,35 @@ fn initPostPipeline(
             },
         },
     });
+}
+
+/// Initialize a compute pipeline from MSL source code.
+/// The source must contain a kernel function named "computeMain".
+fn initComputePipeline(
+    device: objc.Object,
+    data: [:0]const u8,
+) !ComputePipeline {
+    // Compile the MSL source into a library.
+    const compute_library = library: {
+        const source = try macos.foundation.String.createWithBytes(
+            data,
+            .utf8,
+            false,
+        );
+        defer source.release();
+
+        var err: ?*anyopaque = null;
+        const lib = device.msgSend(
+            objc.Object,
+            objc.sel("newLibraryWithSource:options:error:"),
+            .{ source, @as(?*anyopaque, null), &err },
+        );
+        try checkError(err);
+        break :library lib;
+    };
+    defer compute_library.msgSend(void, objc.sel("release"), .{});
+
+    return try ComputePipeline.init(device, compute_library);
 }
 
 fn checkError(err_: ?*anyopaque) !void {

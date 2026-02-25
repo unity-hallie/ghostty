@@ -196,6 +196,7 @@ pub fn initShaders(
     self: *const Metal,
     alloc: Allocator,
     custom_shaders: []const [:0]const u8,
+    compute_shader: ?[:0]const u8,
 ) !shaders.Shaders {
     return try shaders.Shaders.init(
         alloc,
@@ -209,6 +210,7 @@ pub fn initShaders(
             mtl.MTLPixelFormat.bgra8unorm_srgb
         else
             mtl.MTLPixelFormat.bgra8unorm,
+        compute_shader,
     );
 }
 
@@ -306,6 +308,25 @@ pub inline fn textureOptions(self: Metal) Texture.Options {
             // errors in Xcode.
             .shader_read = true,
             .render_target = true,
+        },
+    };
+}
+
+/// Returns texture options for compute shader state textures.
+/// These are written by a compute kernel and read by the fragment shader.
+/// Uses rgba16float for full simulation precision (4×f16 = 8 bytes/px).
+/// GPU-private storage — never CPU-accessed, never used as render targets.
+pub inline fn computeStateTextureOptions(self: Metal) Texture.Options {
+    return .{
+        .device = self.device,
+        .pixel_format = .rgba16float,
+        .resource_options = .{
+            .cpu_cache_mode = .write_combined,
+            .storage_mode = .private,
+        },
+        .usage = .{
+            .shader_read = true,
+            .shader_write = true,
         },
     };
 }

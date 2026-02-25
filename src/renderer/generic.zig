@@ -210,6 +210,9 @@ pub fn Renderer(comptime GraphicsAPI: type) type {
         /// Whether or not we have custom shaders.
         has_custom_shaders: bool = false,
 
+        /// Whether or not we have a compute shader alongside the custom shader.
+        has_compute_shader: bool = false,
+
         /// Our shader pipelines.
         shaders: Shaders,
 
@@ -256,12 +259,12 @@ pub fn Renderer(comptime GraphicsAPI: type) type {
             /// the renderer is deinited after that.
             defunct: bool = false,
 
-            pub fn init(api: GraphicsAPI, custom_shaders: bool) !SwapChain {
+            pub fn init(api: GraphicsAPI, custom_shaders: bool, compute_shaders: bool) !SwapChain {
                 var result: SwapChain = .{ .frames = undefined };
 
                 // Initialize all of our frame state.
                 for (&result.frames) |*frame| {
-                    frame.* = try FrameState.init(api, custom_shaders);
+                    frame.* = try FrameState.init(api, custom_shaders, compute_shaders);
                 }
 
                 return result;
@@ -329,12 +332,16 @@ pub fn Renderer(comptime GraphicsAPI: type) type {
             /// Custom shader state, this is null if we have no custom shaders.
             custom_shader_state: ?CustomShaderState = null,
 
+            /// Compute shader state (ping-pong state textures), null if no
+            /// compute shader is configured or the backend doesn't support it.
+            compute_shader_state: ?ComputeShaderState = null,
+
             const UniformBuffer = Buffer(shaderpkg.Uniforms);
             const CellBgBuffer = Buffer(shaderpkg.CellBg);
             const CellTextBuffer = Buffer(shaderpkg.CellText);
             const BgImageBuffer = Buffer(shaderpkg.BgImage);
 
-            pub fn init(api: GraphicsAPI, custom_shaders: bool) !FrameState {
+            pub fn init(api: GraphicsAPI, custom_shaders: bool, compute_shaders: bool) !FrameState {
                 // Uniform buffer contains exactly 1 uniform struct. The
                 // uniform data will be undefined so this must be set before
                 // a frame is drawn.
@@ -383,6 +390,13 @@ pub fn Renderer(comptime GraphicsAPI: type) type {
                         null;
                 errdefer if (custom_shader_state) |*state| state.deinit();
 
+                var compute_shader_state: ?ComputeShaderState =
+                    if (compute_shaders and @hasDecl(GraphicsAPI, "computeStateTextureOptions"))
+                        try ComputeShaderState.init(api)
+                    else
+                        null;
+                errdefer if (compute_shader_state) |*state| state.deinit();
+
                 // Initialize the target. Just as with the other resources,
                 // start it off as small as we can since it'll be resized.
                 const target = try api.initTarget(1, 1);
@@ -396,6 +410,7 @@ pub fn Renderer(comptime GraphicsAPI: type) type {
                     .color = color,
                     .target = target,
                     .custom_shader_state = custom_shader_state,
+                    .compute_shader_state = compute_shader_state,
                 };
             }
 
@@ -408,6 +423,7 @@ pub fn Renderer(comptime GraphicsAPI: type) type {
                 self.color.deinit();
                 self.bg_image_buffer.deinit();
                 if (self.custom_shader_state) |*state| state.deinit();
+                if (self.compute_shader_state) |*state| state.deinit();
             }
 
             pub fn resize(
@@ -417,6 +433,9 @@ pub fn Renderer(comptime GraphicsAPI: type) type {
                 height: usize,
             ) !void {
                 if (self.custom_shader_state) |*state| {
+                    try state.resize(api, width, height);
+                }
+                if (self.compute_shader_state) |*state| {
                     try state.resize(api, width, height);
                 }
                 const target = try api.initTarget(width, height);
@@ -545,6 +564,81 @@ pub fn Renderer(comptime GraphicsAPI: type) type {
                 self.front_texture = front_texture;
                 self.back_texture = back_texture;
                 self.feedback_texture = feedback_texture;
+            }
+        };
+
+        /// State for the optional compute pass. Holds two ping-pong textures
+        /// that carry simulation state (e.g. Physarum trail density, nutrient
+        /// levels) across frames, independent of the display output.
+        ///
+        /// Only created when the user provides a .compute.msl file alongside
+        /// their custom fragment shader, and only on backends that declare
+        /// `computeStateTextureOptions` (currently Metal only).
+        const ComputeShaderState = struct {
+            /// The two compute state textures for ping-pong.
+            /// Each frame: compute reads state_read, writes state_write,
+            /// then they are swapped so the next frame has fresh data.
+            state_read: Texture,
+            state_write: Texture,
+
+            pub fn swap(self: *ComputeShaderState) void {
+                std.mem.swap(Texture, &self.state_read, &self.state_write);
+            }
+
+            pub fn init(api: GraphicsAPI) !ComputeShaderState {
+                const state_read = try Texture.init(
+                    api.computeStateTextureOptions(),
+                    1,
+                    1,
+                    null,
+                );
+                errdefer state_read.deinit();
+
+                const state_write = try Texture.init(
+                    api.computeStateTextureOptions(),
+                    1,
+                    1,
+                    null,
+                );
+                errdefer state_write.deinit();
+
+                return .{
+                    .state_read = state_read,
+                    .state_write = state_write,
+                };
+            }
+
+            pub fn deinit(self: *ComputeShaderState) void {
+                self.state_read.deinit();
+                self.state_write.deinit();
+            }
+
+            pub fn resize(
+                self: *ComputeShaderState,
+                api: GraphicsAPI,
+                width: usize,
+                height: usize,
+            ) !void {
+                const state_read = try Texture.init(
+                    api.computeStateTextureOptions(),
+                    @intCast(width),
+                    @intCast(height),
+                    null,
+                );
+                errdefer state_read.deinit();
+
+                const state_write = try Texture.init(
+                    api.computeStateTextureOptions(),
+                    @intCast(width),
+                    @intCast(height),
+                    null,
+                );
+                errdefer state_write.deinit();
+
+                self.state_read.deinit();
+                self.state_write.deinit();
+                self.state_read = state_read;
+                self.state_write = state_write;
             }
         };
 
@@ -684,6 +778,7 @@ pub fn Renderer(comptime GraphicsAPI: type) type {
             var swap_chain = try SwapChain.init(
                 api,
                 has_custom_shaders,
+                false, // compute_shaders: initialized after initShaders() below
             );
             errdefer swap_chain.deinit();
 
@@ -861,14 +956,46 @@ pub fn Renderer(comptime GraphicsAPI: type) type {
 
             const has_custom_shaders = custom_shaders.len > 0;
 
+            // Look for a compute shader alongside the first fragment shader.
+            // Convention: if "myshader.glsl" is listed, we look for
+            // "myshader.compute.glsl" (or "myshader.compute.msl") next to it.
+            // Only Metal supports compute shaders; on other backends this is null.
+            const compute_shader: ?[:0]const u8 = compute: {
+                if (!@hasDecl(GraphicsAPI, "computeStateTextureOptions")) break :compute null;
+
+                for (self.config.custom_shaders.value.items) |item| {
+                    const path = switch (item) {
+                        .optional => |p| p,
+                        .required => |p| p,
+                    };
+
+                    // Try to load a sibling MSL compute shader directly.
+                    // The file must be plain MSL (not GLSL) and contain a
+                    // kernel function named "computeMain".
+                    const compute_msl = shadertoy.loadComputeMsl(
+                        arena_alloc,
+                        path,
+                    ) catch |err| {
+                        if (err != error.FileNotFound) {
+                            log.warn("error loading compute shader err={}", .{err});
+                        }
+                        continue;
+                    };
+                    break :compute compute_msl;
+                }
+                break :compute null;
+            };
+
             var shaders = try self.api.initShaders(
                 self.alloc,
                 custom_shaders,
+                compute_shader,
             );
             errdefer shaders.deinit(self.alloc);
 
             self.shaders = shaders;
             self.has_custom_shaders = has_custom_shaders;
+            self.has_compute_shader = compute_shader != null;
         }
 
         /// This is called early right after surface creation.
@@ -967,6 +1094,7 @@ pub fn Renderer(comptime GraphicsAPI: type) type {
             self.swap_chain = try SwapChain.init(
                 self.api,
                 self.has_custom_shaders,
+                self.has_compute_shader,
             );
             self.reinitialize_shaders = false;
             self.target_config_modified = 1;
@@ -1681,6 +1809,38 @@ pub fn Renderer(comptime GraphicsAPI: type) type {
                 // Sync our uniforms.
                 try state.uniforms.sync(&.{self.custom_shader_uniforms});
 
+                // Run compute pass BEFORE the render pass if we have a compute
+                // shader. This updates the simulation state textures so the
+                // fragment shader can read fresh state via iChannel2.
+                // Guard with comptime checks — only Metal has computePass and
+                // compute_pipeline. On other backends this compiles to nothing.
+                if (comptime @hasDecl(@TypeOf(frame_ctx), "computePass") and
+                    @hasField(Shaders, "compute_pipeline"))
+                {
+                    if (self.has_compute_shader) {
+                        if (self.shaders.compute_pipeline) |cp| {
+                            if (frame.compute_shader_state) |*cs| {
+                                frame_ctx.computePass(.{
+                                    .pipeline = cp,
+                                    // iChannel0 (terminal) at index 0,
+                                    // iChannel1 (feedback) at index 2,
+                                    // previous state_read at index 3.
+                                    .textures_read = &.{
+                                        state.back_texture,
+                                        null,
+                                        state.feedback_texture,
+                                        cs.state_read,
+                                    },
+                                    .state_write = cs.state_write,
+                                    .width  = frame.target.width,
+                                    .height = frame.target.height,
+                                });
+                                cs.swap();
+                            }
+                        }
+                    }
+                }
+
                 for (self.shaders.post_pipelines, 0..) |pipeline, i| {
                     defer state.swap();
 
@@ -1693,13 +1853,25 @@ pub fn Renderer(comptime GraphicsAPI: type) type {
                     }});
                     defer pass.complete();
 
+                    // Build texture list: iChannel0=terminal, skip binding 1 (Globals UBO),
+                    // iChannel1=feedback at binding 2, iChannel2=compute state at binding 3.
+                    const compute_state_read: ?Texture = if (frame.compute_shader_state) |cs|
+                        cs.state_read
+                    else
+                        null;
+
                     pass.step(.{
                         .pipeline = pipeline,
                         .uniforms = state.uniforms.buffer,
-                        // iChannel0 at binding 0, skip binding 1 (used by Globals uniform block),
-                        // iChannel1 at binding 2.
-                        .textures = &.{ state.back_texture, null, state.feedback_texture },
-                        .samplers = &.{ state.sampler, null, state.sampler },
+                        .textures = &.{
+                            state.back_texture,    // binding 0 = iChannel0 (terminal)
+                            null,                  // binding 1 = reserved (Globals UBO)
+                            state.feedback_texture, // binding 2 = iChannel1 (display feedback)
+                            compute_state_read,    // binding 3 = iChannel2 (compute state)
+                        },
+                        .samplers = &.{
+                            state.sampler, null, state.sampler, state.sampler,
+                        },
                         .draw = .{
                             .type = .triangle,
                             .vertex_count = 3,

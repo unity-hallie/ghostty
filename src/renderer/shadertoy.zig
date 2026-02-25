@@ -135,6 +135,46 @@ pub fn loadFromFile(
     };
 }
 
+/// Look for a sibling compute shader next to the given fragment shader path.
+/// The compute shader must be a plain MSL file (not GLSL) ending in
+/// ".compute.msl". For example, if the fragment shader is "physarum.glsl",
+/// this function looks for "physarum.compute.msl".
+///
+/// Returns the file contents as a null-terminated string allocated with
+/// alloc_gpa. Returns error.FileNotFound if no compute shader exists.
+pub fn loadComputeMsl(
+    alloc_gpa: Allocator,
+    fragment_path: []const u8,
+) ![:0]const u8 {
+    // Build the compute path: strip the last extension, append ".compute.msl"
+    var arena = ArenaAllocator.init(alloc_gpa);
+    defer arena.deinit();
+    const alloc = arena.allocator();
+
+    // Strip extension from fragment path
+    const stem = std.fs.path.stem(fragment_path);
+    const dir = std.fs.path.dirname(fragment_path) orelse ".";
+
+    const compute_filename = try std.fmt.allocPrint(alloc, "{s}.compute.msl", .{stem});
+    const compute_path = try std.fs.path.join(alloc, &.{ dir, compute_filename });
+
+    // Try to read the file
+    const cwd = std.fs.cwd();
+    const file = cwd.openFile(compute_path, .{}) catch |err| return err;
+    defer file.close();
+
+    const src = try file.readToEndAllocOptions(
+        alloc_gpa,
+        4 * 1024 * 1024, // 4MB
+        null,
+        @alignOf(u8),
+        0, // null terminator
+    );
+
+    log.info("loaded compute shader path={s}", .{compute_path});
+    return src[0 .. src.len - 1 :0];
+}
+
 /// Convert a ShaderToy shader into valid GLSL.
 ///
 /// ShaderToy shaders aren't full shaders, they're just implementing a
