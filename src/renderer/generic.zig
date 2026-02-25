@@ -433,6 +433,10 @@ pub fn Renderer(comptime GraphicsAPI: type) type {
             front_texture: Texture,
             back_texture: Texture,
 
+            /// The feedback texture stores the previous frame's final output
+            /// and is bound as iChannel1, giving shaders temporal memory.
+            feedback_texture: Texture,
+
             /// Shadertoy uses a sampler for accessing the various channel
             /// textures. In Metal, we need to explicitly create these since
             /// the glslang-to-msl compiler doesn't do it for us (as we
@@ -477,12 +481,21 @@ pub fn Renderer(comptime GraphicsAPI: type) type {
                 );
                 errdefer back_texture.deinit();
 
+                const feedback_texture = try Texture.init(
+                    api.textureOptions(),
+                    1,
+                    1,
+                    null,
+                );
+                errdefer feedback_texture.deinit();
+
                 const sampler = try Sampler.init(api.samplerOptions());
                 errdefer sampler.deinit();
 
                 return .{
                     .front_texture = front_texture,
                     .back_texture = back_texture,
+                    .feedback_texture = feedback_texture,
                     .sampler = sampler,
                     .uniforms = uniforms,
                 };
@@ -491,6 +504,7 @@ pub fn Renderer(comptime GraphicsAPI: type) type {
             pub fn deinit(self: *CustomShaderState) void {
                 self.front_texture.deinit();
                 self.back_texture.deinit();
+                self.feedback_texture.deinit();
                 self.sampler.deinit();
                 self.uniforms.deinit();
             }
@@ -516,11 +530,21 @@ pub fn Renderer(comptime GraphicsAPI: type) type {
                 );
                 errdefer back_texture.deinit();
 
+                const feedback_texture = try Texture.init(
+                    api.textureOptions(),
+                    @intCast(width),
+                    @intCast(height),
+                    null,
+                );
+                errdefer feedback_texture.deinit();
+
                 self.front_texture.deinit();
                 self.back_texture.deinit();
+                self.feedback_texture.deinit();
 
                 self.front_texture = front_texture;
                 self.back_texture = back_texture;
+                self.feedback_texture = feedback_texture;
             }
         };
 
@@ -1672,14 +1696,20 @@ pub fn Renderer(comptime GraphicsAPI: type) type {
                     pass.step(.{
                         .pipeline = pipeline,
                         .uniforms = state.uniforms.buffer,
-                        .textures = &.{state.back_texture},
-                        .samplers = &.{state.sampler},
+                        // iChannel0 at binding 0, skip binding 1 (used by Globals uniform block),
+                        // iChannel1 at binding 2.
+                        .textures = &.{ state.back_texture, null, state.feedback_texture },
+                        .samplers = &.{ state.sampler, null, state.sampler },
                         .draw = .{
                             .type = .triangle,
                             .vertex_count = 3,
                         },
                     });
                 }
+
+                // Copy the final output to the feedback texture so it's
+                // available as iChannel1 on the next frame.
+                frame_ctx.blitTexture(frame.target, state.feedback_texture);
             }
         }
 
