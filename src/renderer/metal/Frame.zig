@@ -9,6 +9,7 @@ const mtl = @import("api.zig");
 const Renderer = @import("../generic.zig").Renderer(Metal);
 const Metal = @import("../Metal.zig");
 const Target = @import("Target.zig");
+const Texture = @import("Texture.zig");
 const RenderPass = @import("RenderPass.zig");
 
 const Health = @import("../../renderer.zig").Health;
@@ -100,6 +101,40 @@ pub inline fn renderPass(
         .attachments = attachments,
         .command_buffer = self.buffer,
     });
+}
+
+/// Copy the contents of the display target to a texture using a blit
+/// command encoder. Used to capture the final shader output into the
+/// feedback texture so it's available as iChannel1 on the next frame.
+pub inline fn blitTexture(self: *const Self, src: Target, dst: Texture) void {
+    const encoder = self.buffer.msgSend(
+        objc.Object,
+        objc.sel("blitCommandEncoder"),
+        .{},
+    );
+
+    // copyFromTexture:sourceSlice:sourceLevel:sourceOrigin:sourceSize:
+    //   toTexture:destinationSlice:destinationLevel:destinationOrigin:
+    encoder.msgSend(void, objc.sel(
+        "copyFromTexture:sourceSlice:sourceLevel:sourceOrigin:sourceSize:" ++
+            "toTexture:destinationSlice:destinationLevel:destinationOrigin:",
+    ), .{
+        src.texture.value,
+        @as(c_ulong, 0),
+        @as(c_ulong, 0),
+        mtl.MTLOrigin{ .x = 0, .y = 0, .z = 0 },
+        mtl.MTLSize{
+            .width = @intCast(dst.width),
+            .height = @intCast(dst.height),
+            .depth = 1,
+        },
+        dst.texture.value,
+        @as(c_ulong, 0),
+        @as(c_ulong, 0),
+        mtl.MTLOrigin{ .x = 0, .y = 0, .z = 0 },
+    });
+
+    encoder.msgSend(void, objc.sel("endEncoding"), .{});
 }
 
 /// Complete this frame and present the target.

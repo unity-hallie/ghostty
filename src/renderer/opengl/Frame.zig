@@ -8,6 +8,7 @@ const gl = @import("opengl");
 const Renderer = @import("../generic.zig").Renderer(OpenGL);
 const OpenGL = @import("../OpenGL.zig");
 const Target = @import("Target.zig");
+const Texture = @import("Texture.zig");
 const RenderPass = @import("RenderPass.zig");
 
 const Health = @import("../../renderer.zig").Health;
@@ -45,6 +46,40 @@ pub inline fn renderPass(
 ) RenderPass {
     _ = self;
     return RenderPass.begin(.{ .attachments = attachments });
+}
+
+/// Copy the contents of the display target to a texture using
+/// glBlitFramebuffer. Used to capture the final shader output into
+/// the feedback texture so it's available as iChannel1 on the next frame.
+pub inline fn blitTexture(self: *const Self, src: Target, dst: Texture) void {
+    _ = self;
+
+    // Bind the source target's FBO for reading.
+    const src_bind = src.framebuffer.bind(.read) catch return;
+    defer src_bind.unbind();
+
+    // Create a temporary FBO and attach the destination texture for drawing.
+    const dst_fbo = gl.Framebuffer.create() catch return;
+    defer dst_fbo.destroy();
+
+    const dst_bind = dst_fbo.bind(.draw) catch return;
+    defer dst_bind.unbind();
+
+    dst_bind.texture2D(.color0, dst.target, dst.texture, 0) catch return;
+
+    // Blit from source to destination.
+    gl.glad.context.BlitFramebuffer.?(
+        0,
+        0,
+        @intCast(src.width),
+        @intCast(src.height),
+        0,
+        0,
+        @intCast(dst.width),
+        @intCast(dst.height),
+        gl.c.GL_COLOR_BUFFER_BIT,
+        gl.c.GL_NEAREST,
+    );
 }
 
 /// Complete this frame and present the target.
