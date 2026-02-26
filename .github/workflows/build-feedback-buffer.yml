@@ -26,16 +26,23 @@ jobs:
         id: deps
         run: nix build -L .#deps && echo "deps=$(readlink ./result)" >> $GITHUB_OUTPUT
 
-      # Build GhosttyKit framework via Zig
+      # Build GhosttyKit framework via Zig (ReleaseFast = optimized, no debug overhead)
       - name: Build GhosttyKit
-        run: nix develop -c zig build --system ${{ steps.deps.outputs.deps }} -Demit-macos-app=false
+        run: nix develop -c zig build --system ${{ steps.deps.outputs.deps }} -Demit-macos-app=false -Doptimize=ReleaseFast
 
       # Build the native macOS app via Xcode (MUST be outside Nix env)
+      # ReleaseLocal = production optimized, ad-hoc signed (no Developer ID needed)
       - name: Build Ghostty.app
-        run: cd macos && xcodebuild -target Ghostty -configuration Debug
+        run: |
+          cd macos && xcodebuild \
+            -target Ghostty \
+            -configuration ReleaseLocal \
+            CODE_SIGN_IDENTITY="-" \
+            CODE_SIGNING_REQUIRED=NO \
+            CODE_SIGNING_ALLOWED=NO
 
       - name: Upload Ghostty.app
         uses: actions/upload-artifact@v4
         with:
           name: Ghostty-feedback-buffer
-          path: macos/build/Debug/Ghostty.app
+          path: macos/build/ReleaseLocal/Ghostty.app
