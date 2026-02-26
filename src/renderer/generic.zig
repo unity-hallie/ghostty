@@ -774,11 +774,35 @@ pub fn Renderer(comptime GraphicsAPI: type) type {
 
             const has_custom_shaders = options.config.custom_shaders.value.items.len > 0;
 
+            // Detect if a compute shader exists alongside any custom shader.
+            // We do this before creating the swap chain so compute state textures
+            // are allocated in each frame slot from the start.
+            const has_compute_shader_initial: bool = init: {
+                if (!@hasDecl(GraphicsAPI, "computeStateTextureOptions")) break :init false;
+                for (options.config.custom_shaders.value.items) |item| {
+                    const path = switch (item) {
+                        .optional => |p| p,
+                        .required => |p| p,
+                    };
+                    // Compute path: "myshader.glsl" -> "myshader.compute.msl"
+                    const stem = std.fs.path.stem(path);
+                    const dir = std.fs.path.dirname(path) orelse ".";
+                    var buf: [std.fs.max_path_bytes]u8 = undefined;
+                    const compute_path = std.fmt.bufPrint(
+                        &buf, "{s}/{s}.compute.msl", .{ dir, stem },
+                    ) catch continue;
+                    if (std.fs.cwd().access(compute_path, .{})) {
+                        break :init true;
+                    } else |_| {}
+                }
+                break :init false;
+            };
+
             // Prepare our swap chain
             var swap_chain = try SwapChain.init(
                 api,
                 has_custom_shaders,
-                false, // compute_shaders: initialized after initShaders() below
+                has_compute_shader_initial,
             );
             errdefer swap_chain.deinit();
 
