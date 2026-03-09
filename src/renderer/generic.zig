@@ -2301,6 +2301,21 @@ pub fn Renderer(comptime GraphicsAPI: type) type {
 
             uniforms.frame += 1;
 
+            // iDate: vec4(year, month, day, seconds_since_midnight)
+            const epoch_secs = std.time.epoch.EpochSeconds{
+                .secs = @intCast(std.time.timestamp()),
+            };
+            const epoch_day = epoch_secs.getEpochDay();
+            const year_day = epoch_day.calculateYearDay();
+            const month_day = year_day.calculateMonthDay();
+            const day_secs = epoch_secs.getDaySeconds();
+            uniforms.date = .{
+                @floatFromInt(year_day.year),
+                @floatFromInt(@intFromEnum(month_day.month)),
+                @floatFromInt(month_day.day_index + 1),
+                @floatFromInt(day_secs.secs),
+            };
+
             const screen = self.size.screen;
             const padding = self.size.padding;
             const cell = self.size.cell;
