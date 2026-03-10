@@ -34,6 +34,7 @@ layout(binding = 4) uniform sampler2D iChannel3;  // compute state 1
 layout(binding = 5) uniform sampler2D iChannel4;  // compute state 2
 layout(binding = 6) uniform sampler2D iChannel5;  // input texture 0 (file)
 layout(binding = 7) uniform sampler2D iChannel6;  // input texture 1 (file)
+layout(binding = 8) uniform sampler2D iChannel7;  // semantic texture (model embeddings)
 
 layout(location = 0) in vec4 gl_FragCoord;
 layout(location = 0) out vec4 _fragColor;

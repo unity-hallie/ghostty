@@ -30,6 +30,7 @@ const Health = renderer.Health;
 const getConstraint = @import("../font/nerd_font_attributes.zig").getConstraint;
 
 const FileType = @import("../file_type.zig").FileType;
+const semantic = @import("semantic.zig");
 
 const macos = switch (builtin.os.tag) {
     .macos => @import("macos"),
@@ -221,6 +222,14 @@ pub fn Renderer(comptime GraphicsAPI: type) type {
 
         /// Our shader pipelines.
         shaders: Shaders,
+
+        /// Semantic texture: grid-sized rgba16float texture bound as iChannel7.
+        /// Written by the background semantic thread with model embeddings.
+        semantic_texture: ?Texture = null,
+        semantic_staging: ?semantic.StagingBuffer = null,
+        semantic_thread: ?semantic.SemanticThread = null,
+        /// Frame counter for throttling semantic updates (not every frame).
+        semantic_frame_counter: usize = 0,
 
         /// The render state we update per loop.
         terminal_state: terminal.RenderState = .empty,
@@ -721,6 +730,7 @@ pub fn Renderer(comptime GraphicsAPI: type) type {
             padding_color: configpkg.WindowPaddingColor,
             custom_shaders: configpkg.RepeatablePath,
             custom_shader_inputs: configpkg.RepeatablePath,
+            custom_shader_model: ?[]const u8,
             bg_image: ?configpkg.Path,
             bg_image_opacity: f32,
             bg_image_position: configpkg.BackgroundImagePosition,
@@ -743,6 +753,19 @@ pub fn Renderer(comptime GraphicsAPI: type) type {
                 // Copy our shaders
                 const custom_shaders = try config.@"custom-shader".clone(alloc);
                 const custom_shader_inputs = try config.@"custom-shader-input".clone(alloc);
+
+                // Copy semantic model path
+                const custom_shader_model: ?[]const u8 = if (config.@"custom-shader-model") |model_paths| blk: {
+                    if (model_paths.value.items.len > 0) {
+                        const item = model_paths.value.items[0];
+                        const path = switch (item) {
+                            .optional => |p| p,
+                            .required => |p| p,
+                        };
+                        break :blk try alloc.dupe(u8, path);
+                    }
+                    break :blk null;
+                } else null;
 
                 // Copy our background image
                 const bg_image =
@@ -796,6 +819,7 @@ pub fn Renderer(comptime GraphicsAPI: type) type {
 
                     .custom_shaders = custom_shaders,
                     .custom_shader_inputs = custom_shader_inputs,
+                    .custom_shader_model = custom_shader_model,
                     .bg_image = bg_image,
                     .bg_image_opacity = config.@"background-image-opacity",
                     .bg_image_position = config.@"background-image-position",
@@ -1012,6 +1036,7 @@ pub fn Renderer(comptime GraphicsAPI: type) type {
         }
 
         fn deinitShaders(self: *Self) void {
+            self.deinitSemantic();
             self.deinitInputTextures();
             self.shaders.deinit(self.alloc);
         }
@@ -1073,6 +1098,9 @@ pub fn Renderer(comptime GraphicsAPI: type) type {
             // Load input textures from files.
             self.deinitInputTextures();
             self.loadInputTextures();
+
+            // Initialize semantic texture pipeline if a model is configured.
+            self.initSemantic();
         }
 
         fn loadInputTextures(self: *Self) void {
@@ -1144,6 +1172,132 @@ pub fn Renderer(comptime GraphicsAPI: type) type {
                 }
             }
             self.input_texture_count = 0;
+        }
+
+        fn initSemantic(self: *Self) void {
+            // Clean up any existing semantic state
+            self.deinitSemantic();
+
+            // Only initialize if we have custom shaders (otherwise no iChannel7 consumer)
+            if (!self.has_custom_shaders) return;
+
+            // Create the semantic texture at 1x1 initially (resized with window)
+            if (@hasDecl(GraphicsAPI, "inputTextureOptions")) {
+                self.semantic_texture = Texture.init(
+                    self.api.inputTextureOptions(),
+                    1,
+                    1,
+                    null,
+                ) catch |err| {
+                    log.warn("failed to create semantic texture: {}", .{err});
+                    return;
+                };
+            } else {
+                self.semantic_texture = Texture.init(
+                    self.api.textureOptions(),
+                    1,
+                    1,
+                    null,
+                ) catch |err| {
+                    log.warn("failed to create semantic texture: {}", .{err});
+                    return;
+                };
+            }
+
+            // Create staging buffer (starts 1x1, resized when we know grid size)
+            self.semantic_staging = semantic.StagingBuffer.init(self.alloc, 1, 1) catch |err| {
+                log.warn("failed to create semantic staging buffer: {}", .{err});
+                if (self.semantic_texture) |t| t.deinit();
+                self.semantic_texture = null;
+                return;
+            };
+
+            // Create and start the background thread
+            var sem_thread = semantic.SemanticThread.init(
+                self.alloc,
+                &self.semantic_staging.?,
+                self.config.custom_shader_model,
+            ) catch |err| {
+                log.warn("failed to init semantic thread: {}", .{err});
+                return;
+            };
+
+            sem_thread.start() catch |err| {
+                log.warn("failed to start semantic thread: {}", .{err});
+                sem_thread.deinit();
+                return;
+            };
+
+            self.semantic_thread = sem_thread;
+            log.info("semantic texture pipeline initialized", .{});
+        }
+
+        fn deinitSemantic(self: *Self) void {
+            if (self.semantic_thread) |*t| {
+                t.deinit();
+                self.semantic_thread = null;
+            }
+            if (self.semantic_staging) |*s| {
+                s.deinit(self.alloc);
+                self.semantic_staging = null;
+            }
+            if (self.semantic_texture) |t| {
+                t.deinit();
+                self.semantic_texture = null;
+            }
+        }
+
+        /// Called from the draw loop to update the semantic texture if new data
+        /// is available from the background thread, and to submit new text
+        /// for analysis when the terminal content is dirty.
+        fn updateSemanticTexture(self: *Self) void {
+            var staging = &(self.semantic_staging orelse return);
+
+            // Check if background thread produced new data
+            if (staging.new_data_available.load(.acquire)) {
+                staging.mutex.lock();
+                defer staging.mutex.unlock();
+
+                if (self.semantic_texture) |tex| {
+                    if (tex.width == staging.cols and tex.height == staging.rows and staging.data.len > 0) {
+                        tex.replaceRegion(0, 0, staging.cols, staging.rows, staging.data) catch {};
+                    }
+                }
+                staging.new_data_available.store(false, .release);
+            }
+
+            // Throttle: only submit new text every 8 frames (~60ms at 120fps)
+            self.semantic_frame_counter +%= 1;
+            if (self.semantic_frame_counter % 8 != 0) return;
+
+            // Submit visible text if terminal has content
+            if (self.terminal_state.rows == 0 or self.terminal_state.cols == 0) return;
+
+            // Resize semantic texture and staging if grid size changed
+            const rows = self.terminal_state.rows;
+            const cols = self.terminal_state.cols;
+            if (self.semantic_texture) |tex| {
+                if (tex.width != cols or tex.height != rows) {
+                    // Recreate texture at new size
+                    const opts = if (@hasDecl(GraphicsAPI, "inputTextureOptions"))
+                        self.api.inputTextureOptions()
+                    else
+                        self.api.textureOptions();
+
+                    if (Texture.init(opts, cols, rows, null)) |new_tex| {
+                        tex.deinit();
+                        self.semantic_texture = new_tex;
+                    } else |_| {}
+
+                    staging.resize(self.alloc, rows, cols) catch {};
+                }
+            }
+
+            // Extract text and submit to background thread
+            if (self.semantic_thread) |*sem_thread| {
+                const lines = semantic.extractVisibleText(self.alloc, &self.terminal_state) catch return;
+                sem_thread.submitLines(lines, rows, cols);
+            }
         }
 
         /// This is called early right after surface creation.
@@ -1952,6 +2106,9 @@ pub fn Renderer(comptime GraphicsAPI: type) type {
                 );
             }
 
+            // Update semantic texture from background thread if available.
+            self.updateSemanticTexture();
+
             // If we have custom shaders, then we render them.
             if (frame.custom_shader_state) |*state| {
                 // Sync our uniforms.
@@ -1968,9 +2125,9 @@ pub fn Renderer(comptime GraphicsAPI: type) type {
                     if (self.compute_shader_count > 0) {
                         if (frame.compute_shader_state) |*cs| {
                             for (self.shaders.compute_pipelines[0..@min(self.compute_shader_count, cs.pair_count)], 0..) |cp, ki| {
-                                // Build read textures: terminal, gap, feedback, compute states, input textures.
-                                // Bindings: 0=iChannel0, 1=skip, 2=iChannel1, 3-5=compute, 6-7=inputs
-                                var textures_read: [8]?Texture = .{null} ** 8;
+                                // Build read textures: all channels including semantic.
+                                // Bindings: 0=iChannel0, 1=skip, 2=iChannel1, 3-5=compute, 6-7=inputs, 8=semantic
+                                var textures_read: [9]?Texture = .{null} ** 9;
                                 textures_read[0] = state.back_texture;  // iChannel0
                                 // [1] = null (Globals UBO gap)
                                 textures_read[2] = state.feedback_texture; // iChannel1
@@ -1980,6 +2137,7 @@ pub fn Renderer(comptime GraphicsAPI: type) type {
                                 for (0..self.input_texture_count) |ti| {
                                     textures_read[6 + ti] = self.input_textures[ti];
                                 }
+                                textures_read[8] = self.semantic_texture; // iChannel7
 
                                 frame_ctx.computePass(.{
                                     .pipeline = cp,
@@ -2010,8 +2168,9 @@ pub fn Renderer(comptime GraphicsAPI: type) type {
                     // Build texture list for all iChannels:
                     //   0 = iChannel0 (terminal), 1 = skip (Globals UBO),
                     //   2 = iChannel1 (feedback), 3-5 = iChannel2-4 (compute states),
-                    //   6-7 = iChannel5-6 (file input textures).
-                    var textures: [8]?Texture = .{null} ** 8;
+                    //   6-7 = iChannel5-6 (file input textures),
+                    //   8 = iChannel7 (semantic texture).
+                    var textures: [9]?Texture = .{null} ** 9;
                     textures[0] = state.back_texture;      // binding 0 = iChannel0
                     textures[2] = state.feedback_texture;   // binding 2 = iChannel1
                     if (frame.compute_shader_state) |cs| {
@@ -2022,8 +2181,9 @@ pub fn Renderer(comptime GraphicsAPI: type) type {
                     for (0..self.input_texture_count) |ti| {
                         textures[6 + ti] = self.input_textures[ti];
                     }
+                    textures[8] = self.semantic_texture;   // binding 8 = iChannel7
 
-                    var samplers: [8]?Sampler = .{null} ** 8;
+                    var samplers: [9]?Sampler = .{null} ** 9;
                     samplers[0] = state.sampler;
                     samplers[2] = state.sampler;
                     if (frame.compute_shader_state) |cs| {
@@ -2033,6 +2193,9 @@ pub fn Renderer(comptime GraphicsAPI: type) type {
                     }
                     for (0..self.input_texture_count) |ti| {
                         samplers[6 + ti] = state.sampler;
+                    }
+                    if (self.semantic_texture != null) {
+                        samplers[8] = state.sampler;
                     }
 
                     pass.step(.{

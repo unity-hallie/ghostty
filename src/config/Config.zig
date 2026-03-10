@@ -2944,6 +2944,19 @@ keybind: Keybinds = .{},
 /// This can be changed at runtime and will affect all open terminals.
 @"custom-shader-input": RepeatablePath = .{},
 
+/// Path to a CoreML model (.mlmodelc directory) that produces semantic
+/// embeddings from terminal text. The model should accept a string input
+/// and produce a float array output (embedding vector). The embeddings
+/// are projected to 3D, normalized to the unit sphere, and written to
+/// a grid-sized texture bound as iChannel7.
+///
+/// If not set, or if the model fails to load, iChannel7 will be a blank
+/// texture. The model runs on a background thread using the Apple Neural
+/// Engine when available.
+///
+/// This can be changed at runtime and will affect all open terminals.
+@"custom-shader-model": ?RepeatablePath = null,
+
 /// If `true` (default), the focused terminal surface will run an animation
 /// loop when custom shaders are used. This uses slightly more CPU (generally
 /// less than 10%) but allows the shader to animate. This only runs if there
