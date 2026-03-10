@@ -196,7 +196,7 @@ pub fn initShaders(
     self: *const Metal,
     alloc: Allocator,
     custom_shaders: []const [:0]const u8,
-    compute_shader: ?[:0]const u8,
+    compute_shaders: []const [:0]const u8,
 ) !shaders.Shaders {
     return try shaders.Shaders.init(
         alloc,
@@ -210,7 +210,7 @@ pub fn initShaders(
             mtl.MTLPixelFormat.bgra8unorm_srgb
         else
             mtl.MTLPixelFormat.bgra8unorm,
-        compute_shader,
+        compute_shaders,
     );
 }
 
@@ -327,6 +327,23 @@ pub inline fn computeStateTextureOptions(self: Metal) Texture.Options {
         .usage = .{
             .shader_read = true,
             .shader_write = true,
+        },
+    };
+}
+
+/// Returns texture options for static input textures loaded from image files.
+/// These are read-only in shaders (never written to or used as render targets).
+/// Uses rgba8unorm to match wuffs RGBA decode output.
+pub inline fn inputTextureOptions(self: Metal) Texture.Options {
+    return .{
+        .device = self.device,
+        .pixel_format = .rgba8unorm,
+        .resource_options = .{
+            .cpu_cache_mode = .write_combined,
+            .storage_mode = self.default_storage_mode,
+        },
+        .usage = .{
+            .shader_read = true,
         },
     };
 }

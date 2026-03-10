@@ -2934,6 +2934,16 @@ keybind: Keybinds = .{},
 /// This can be changed at runtime and will affect all open terminals.
 @"custom-shader": RepeatablePath = .{},
 
+/// Static image files (PNG, JPEG) to bind as input textures for custom
+/// shaders. The first image is bound as iChannel5, the second as iChannel6.
+/// Up to 2 input textures are supported. Images are loaded once at init
+/// and on config reload; they keep their native resolution regardless of
+/// window size. Shader authors can use `textureSize(iChannel5, 0)` to
+/// query dimensions.
+///
+/// This can be changed at runtime and will affect all open terminals.
+@"custom-shader-input": RepeatablePath = .{},
+
 /// If `true` (default), the focused terminal surface will run an animation
 /// loop when custom shaders are used. This uses slightly more CPU (generally
 /// less than 10%) but allows the shader to animate. This only runs if there

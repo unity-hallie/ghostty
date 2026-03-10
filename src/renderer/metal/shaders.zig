@@ -107,10 +107,9 @@ pub const Shaders = struct {
     /// against the output of the previous shader.
     post_pipelines: []const Pipeline,
 
-    /// Optional compute pipeline for updating state textures each frame
-    /// before the render pass. Null if the user has not provided a compute
-    /// shader alongside their fragment shader.
-    compute_pipeline: ?ComputePipeline = null,
+    /// Compute pipelines for updating state textures each frame before
+    /// the render pass. One per .compute.msl file. Empty if none provided.
+    compute_pipelines: []const ComputePipeline,
 
     /// Set to true when deinited, if you try to deinit a defunct set
     /// of shaders it will just be ignored, to prevent double-free.
@@ -122,14 +121,14 @@ pub const Shaders = struct {
     /// against the final drawable texture. This is an array of shader source
     /// code, not file paths.
     ///
-    /// "compute_shader" is optional MSL source for a compute kernel that
-    /// runs before the render pass to update simulation state textures.
+    /// "compute_shaders" is a slice of MSL source for compute kernels that
+    /// run before the render pass to update simulation state textures.
     pub fn init(
         alloc: Allocator,
         device: objc.Object,
         post_shaders: []const [:0]const u8,
         pixel_format: mtl.MTLPixelFormat,
-        compute_shader: ?[:0]const u8,
+        compute_shaders: []const [:0]const u8,
     ) !Shaders {
         const library = try initLibrary(device);
         errdefer library.msgSend(void, objc.sel("release"), .{});
@@ -171,19 +170,24 @@ pub const Shaders = struct {
             alloc.free(post_pipelines);
         };
 
-        const compute_pipeline: ?ComputePipeline = if (compute_shader) |src|
-            initComputePipeline(device, src) catch |err| cp: {
-                log.warn("error initializing compute pipeline err={}", .{err});
-                break :cp null;
-            }
-        else
-            null;
+        const compute_pipelines: []const ComputePipeline = initComputePipelines(
+            alloc,
+            device,
+            compute_shaders,
+        ) catch |err| cp: {
+            log.warn("error initializing compute pipelines err={}", .{err});
+            break :cp &.{};
+        };
+        errdefer if (compute_pipelines.len > 0) {
+            for (compute_pipelines) |*cp| @constCast(cp).deinit();
+            alloc.free(compute_pipelines);
+        };
 
         return .{
             .library = library,
             .pipelines = pipelines,
             .post_pipelines = post_pipelines,
-            .compute_pipeline = compute_pipeline,
+            .compute_pipelines = compute_pipelines,
         };
     }
 
@@ -205,8 +209,11 @@ pub const Shaders = struct {
             alloc.free(self.post_pipelines);
         }
 
-        // Release compute pipeline if we have one
-        if (self.compute_pipeline) |*cp| cp.deinit();
+        // Release compute pipelines
+        if (self.compute_pipelines.len > 0) {
+            for (self.compute_pipelines) |*cp| @constCast(cp).deinit();
+            alloc.free(self.compute_pipelines);
+        }
     }
 };
 
@@ -462,6 +469,29 @@ fn initPostPipeline(
             },
         },
     });
+}
+
+/// Initialize multiple compute pipelines from MSL source code.
+fn initComputePipelines(
+    alloc: Allocator,
+    device: objc.Object,
+    shaders: []const [:0]const u8,
+) ![]const ComputePipeline {
+    if (shaders.len == 0) return &.{};
+
+    var i: usize = 0;
+    var pipelines = try alloc.alloc(ComputePipeline, shaders.len);
+    errdefer {
+        for (pipelines[0..i]) |*cp| @constCast(cp).deinit();
+        alloc.free(pipelines);
+    }
+
+    for (shaders) |source| {
+        pipelines[i] = try initComputePipeline(device, source);
+        i += 1;
+    }
+
+    return pipelines;
 }
 
 /// Initialize a compute pipeline from MSL source code.

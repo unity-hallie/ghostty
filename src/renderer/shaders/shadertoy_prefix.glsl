@@ -29,7 +29,11 @@ layout(binding = 1, std140) uniform Globals {
 
 layout(binding = 0) uniform sampler2D iChannel0;  // current terminal frame
 layout(binding = 2) uniform sampler2D iChannel1;  // previous composite frame (display feedback)
-layout(binding = 3) uniform sampler2D iChannel2;  // compute state (rgba16f, updated by compute kernel)
+layout(binding = 3) uniform sampler2D iChannel2;  // compute state 0 (rgba16f, updated by compute kernel)
+layout(binding = 4) uniform sampler2D iChannel3;  // compute state 1
+layout(binding = 5) uniform sampler2D iChannel4;  // compute state 2
+layout(binding = 6) uniform sampler2D iChannel5;  // input texture 0 (file)
+layout(binding = 7) uniform sampler2D iChannel6;  // input texture 1 (file)
 
 layout(location = 0) in vec4 gl_FragCoord;
 layout(location = 0) out vec4 _fragColor;

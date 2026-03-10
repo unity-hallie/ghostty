@@ -267,10 +267,10 @@ pub fn initShaders(
     self: *const OpenGL,
     alloc: Allocator,
     custom_shaders: []const [:0]const u8,
-    compute_shader: ?[:0]const u8,
+    compute_shaders: []const [:0]const u8,
 ) !shaders.Shaders {
     _ = alloc;
-    _ = compute_shader; // OpenGL backend does not support compute shaders.
+    _ = compute_shaders; // OpenGL backend does not support compute shaders.
     return try shaders.Shaders.init(
         self.alloc,
         custom_shaders,

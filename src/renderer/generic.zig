@@ -210,8 +210,14 @@ pub fn Renderer(comptime GraphicsAPI: type) type {
         /// Whether or not we have custom shaders.
         has_custom_shaders: bool = false,
 
-        /// Whether or not we have a compute shader alongside the custom shader.
-        has_compute_shader: bool = false,
+        /// Number of compute shaders (0 = none). Each gets its own ping-pong pair.
+        compute_shader_count: usize = 0,
+
+        /// Static input textures loaded from files, bound as iChannel5 and iChannel6.
+        /// Maximum 2 input textures. These keep their native resolution.
+        const max_input_textures = 2;
+        input_textures: [max_input_textures]?Texture = .{ null, null },
+        input_texture_count: usize = 0,
 
         /// Our shader pipelines.
         shaders: Shaders,
@@ -259,12 +265,12 @@ pub fn Renderer(comptime GraphicsAPI: type) type {
             /// the renderer is deinited after that.
             defunct: bool = false,
 
-            pub fn init(api: GraphicsAPI, custom_shaders: bool, compute_shaders: bool) !SwapChain {
+            pub fn init(api: GraphicsAPI, custom_shaders: bool, compute_shader_count: usize) !SwapChain {
                 var result: SwapChain = .{ .frames = undefined };
 
                 // Initialize all of our frame state.
                 for (&result.frames) |*frame| {
-                    frame.* = try FrameState.init(api, custom_shaders, compute_shaders);
+                    frame.* = try FrameState.init(api, custom_shaders, compute_shader_count);
                 }
 
                 return result;
@@ -341,7 +347,7 @@ pub fn Renderer(comptime GraphicsAPI: type) type {
             const CellTextBuffer = Buffer(shaderpkg.CellText);
             const BgImageBuffer = Buffer(shaderpkg.BgImage);
 
-            pub fn init(api: GraphicsAPI, custom_shaders: bool, compute_shaders: bool) !FrameState {
+            pub fn init(api: GraphicsAPI, custom_shaders: bool, compute_shader_count: usize) !FrameState {
                 // Uniform buffer contains exactly 1 uniform struct. The
                 // uniform data will be undefined so this must be set before
                 // a frame is drawn.
@@ -391,8 +397,8 @@ pub fn Renderer(comptime GraphicsAPI: type) type {
                 errdefer if (custom_shader_state) |*state| state.deinit();
 
                 var compute_shader_state: ?ComputeShaderState =
-                    if (compute_shaders and @hasDecl(GraphicsAPI, "computeStateTextureOptions"))
-                        try ComputeShaderState.init(api)
+                    if (compute_shader_count > 0 and @hasDecl(GraphicsAPI, "computeStateTextureOptions"))
+                        try ComputeShaderState.init(api, compute_shader_count)
                     else
                         null;
                 errdefer if (compute_shader_state) |*state| state.deinit();
@@ -567,50 +573,104 @@ pub fn Renderer(comptime GraphicsAPI: type) type {
             }
         };
 
-        /// State for the optional compute pass. Holds two ping-pong textures
-        /// that carry simulation state (e.g. Physarum trail density, nutrient
-        /// levels) across frames, independent of the display output.
+        /// State for the optional compute pass. Holds N ping-pong texture
+        /// pairs that carry simulation state (e.g. Physarum trail density,
+        /// nutrient levels) across frames, independent of the display output.
         ///
-        /// Only created when the user provides a .compute.msl file alongside
+        /// Each pair corresponds to one compute kernel (.compute.msl file).
+        /// Pair 0 is bound as iChannel2, pair 1 as iChannel3, pair 2 as iChannel4.
+        ///
+        /// Only created when the user provides .compute.msl files alongside
         /// their custom fragment shader, and only on backends that declare
         /// `computeStateTextureOptions` (currently Metal only).
         const ComputeShaderState = struct {
-            /// The two compute state textures for ping-pong.
-            /// Each frame: compute reads state_read, writes state_write,
-            /// then they are swapped so the next frame has fresh data.
-            state_read: Texture,
-            state_write: Texture,
+            /// Maximum number of compute state pairs (iChannel2..iChannel4).
+            const max_pairs = 3;
 
-            pub fn swap(self: *ComputeShaderState) void {
-                std.mem.swap(Texture, &self.state_read, &self.state_write);
-            }
+            /// A single ping-pong texture pair for one compute kernel.
+            const PingPongPair = struct {
+                state_read: Texture,
+                state_write: Texture,
 
-            pub fn init(api: GraphicsAPI) !ComputeShaderState {
-                const state_read = try Texture.init(
-                    api.computeStateTextureOptions(),
-                    1,
-                    1,
-                    null,
-                );
-                errdefer state_read.deinit();
+                pub fn swap(self: *PingPongPair) void {
+                    std.mem.swap(Texture, &self.state_read, &self.state_write);
+                }
 
-                const state_write = try Texture.init(
-                    api.computeStateTextureOptions(),
-                    1,
-                    1,
-                    null,
-                );
-                errdefer state_write.deinit();
+                pub fn init(api: GraphicsAPI) !PingPongPair {
+                    const state_read = try Texture.init(
+                        api.computeStateTextureOptions(),
+                        1,
+                        1,
+                        null,
+                    );
+                    errdefer state_read.deinit();
 
-                return .{
-                    .state_read = state_read,
-                    .state_write = state_write,
-                };
+                    const state_write = try Texture.init(
+                        api.computeStateTextureOptions(),
+                        1,
+                        1,
+                        null,
+                    );
+                    errdefer state_write.deinit();
+
+                    return .{
+                        .state_read = state_read,
+                        .state_write = state_write,
+                    };
+                }
+
+                pub fn deinit(self: *PingPongPair) void {
+                    self.state_read.deinit();
+                    self.state_write.deinit();
+                }
+
+                pub fn resize(
+                    self: *PingPongPair,
+                    api: GraphicsAPI,
+                    width: usize,
+                    height: usize,
+                ) !void {
+                    const state_read = try Texture.init(
+                        api.computeStateTextureOptions(),
+                        @intCast(width),
+                        @intCast(height),
+                        null,
+                    );
+                    errdefer state_read.deinit();
+
+                    const state_write = try Texture.init(
+                        api.computeStateTextureOptions(),
+                        @intCast(width),
+                        @intCast(height),
+                        null,
+                    );
+                    errdefer state_write.deinit();
+
+                    self.state_read.deinit();
+                    self.state_write.deinit();
+                    self.state_read = state_read;
+                    self.state_write = state_write;
+                }
+            };
+
+            /// Fixed-size array of pairs; `pair_count` says how many are active.
+            pairs: [max_pairs]PingPongPair = undefined,
+            pair_count: usize = 0,
+
+            pub fn init(api: GraphicsAPI, count: usize) !ComputeShaderState {
+                var self: ComputeShaderState = .{ .pair_count = @min(count, max_pairs) };
+                var initialized: usize = 0;
+                errdefer for (self.pairs[0..initialized]) |*p| p.deinit();
+
+                for (self.pairs[0..self.pair_count]) |*p| {
+                    p.* = try PingPongPair.init(api);
+                    initialized += 1;
+                }
+                return self;
             }
 
             pub fn deinit(self: *ComputeShaderState) void {
-                self.state_read.deinit();
-                self.state_write.deinit();
+                for (self.pairs[0..self.pair_count]) |*p| p.deinit();
             }
 
             pub fn resize(
@@ -619,26 +679,15 @@ pub fn Renderer(comptime GraphicsAPI: type) type {
                 width: usize,
                 height: usize,
             ) !void {
-                const state_read = try Texture.init(
-                    api.computeStateTextureOptions(),
-                    @intCast(width),
-                    @intCast(height),
-                    null,
-                );
-                errdefer state_read.deinit();
+                for (self.pairs[0..self.pair_count]) |*p| {
+                    try p.resize(api, width, height);
+                }
+            }
 
-                const state_write = try Texture.init(
-                    api.computeStateTextureOptions(),
-                    @intCast(width),
-                    @intCast(height),
-                    null,
-                );
-                errdefer state_write.deinit();
-
-                self.state_read.deinit();
-                self.state_write.deinit();
-                self.state_read = state_read;
-                self.state_write = state_write;
+            /// Convenience: get the state_read texture for pair i, or null.
+            pub fn readTexture(self: *const ComputeShaderState, i: usize) ?Texture {
+                if (i < self.pair_count) return self.pairs[i].state_read;
+                return null;
             }
         };
 
@@ -671,6 +720,7 @@ pub fn Renderer(comptime GraphicsAPI: type) type {
             min_contrast: f32,
             padding_color: configpkg.WindowPaddingColor,
             custom_shaders: configpkg.RepeatablePath,
+            custom_shader_inputs: configpkg.RepeatablePath,
             bg_image: ?configpkg.Path,
             bg_image_opacity: f32,
             bg_image_position: configpkg.BackgroundImagePosition,
@@ -692,6 +742,7 @@ pub fn Renderer(comptime GraphicsAPI: type) type {
 
                 // Copy our shaders
                 const custom_shaders = try config.@"custom-shader".clone(alloc);
+                const custom_shader_inputs = try config.@"custom-shader-input".clone(alloc);
 
                 // Copy our background image
                 const bg_image =
@@ -744,6 +795,7 @@ pub fn Renderer(comptime GraphicsAPI: type) type {
                     .search_selected_foreground = config.@"search-selected-foreground",
 
                     .custom_shaders = custom_shaders,
+                    .custom_shader_inputs = custom_shader_inputs,
                     .bg_image = bg_image,
                     .bg_image_opacity = config.@"background-image-opacity",
                     .bg_image_position = config.@"background-image-position",
@@ -774,17 +826,17 @@ pub fn Renderer(comptime GraphicsAPI: type) type {
 
             const has_custom_shaders = options.config.custom_shaders.value.items.len > 0;
 
-            // Detect if a compute shader exists alongside any custom shader.
+            // Count how many compute shaders exist alongside custom shaders.
             // We do this before creating the swap chain so compute state textures
             // are allocated in each frame slot from the start.
-            const has_compute_shader_initial: bool = init: {
-                if (!@hasDecl(GraphicsAPI, "computeStateTextureOptions")) break :init false;
+            const compute_shader_count_initial: usize = init: {
+                if (!@hasDecl(GraphicsAPI, "computeStateTextureOptions")) break :init 0;
+                var count: usize = 0;
                 for (options.config.custom_shaders.value.items) |item| {
                     const path = switch (item) {
                         .optional => |p| p,
                         .required => |p| p,
                     };
-                    // Compute path: "myshader.glsl" -> "myshader.compute.msl"
                     const stem = std.fs.path.stem(path);
                     const dir = std.fs.path.dirname(path) orelse ".";
                     var buf: [std.fs.max_path_bytes]u8 = undefined;
@@ -792,17 +844,17 @@ pub fn Renderer(comptime GraphicsAPI: type) type {
                         &buf, "{s}/{s}.compute.msl", .{ dir, stem },
                     ) catch continue;
                     if (std.fs.cwd().access(compute_path, .{})) {
-                        break :init true;
+                        count += 1;
                     } else |_| {}
                 }
-                break :init false;
+                break :init count;
             };
 
             // Prepare our swap chain
             var swap_chain = try SwapChain.init(
                 api,
                 has_custom_shaders,
-                has_compute_shader_initial,
+                compute_shader_count_initial,
             );
             errdefer swap_chain.deinit();
 
@@ -960,6 +1012,7 @@ pub fn Renderer(comptime GraphicsAPI: type) type {
         }
 
         fn deinitShaders(self: *Self) void {
+            self.deinitInputTextures();
             self.shaders.deinit(self.alloc);
         }
 
@@ -980,22 +1033,19 @@ pub fn Renderer(comptime GraphicsAPI: type) type {
 
             const has_custom_shaders = custom_shaders.len > 0;
 
-            // Look for a compute shader alongside the first fragment shader.
+            // Look for compute shaders alongside each fragment shader.
             // Convention: if "myshader.glsl" is listed, we look for
-            // "myshader.compute.glsl" (or "myshader.compute.msl") next to it.
-            // Only Metal supports compute shaders; on other backends this is null.
-            const compute_shader: ?[:0]const u8 = compute: {
-                if (!@hasDecl(GraphicsAPI, "computeStateTextureOptions")) break :compute null;
-
+            // "myshader.compute.msl" next to it.
+            // Only Metal supports compute shaders; on other backends this is empty.
+            var compute_shaders_list: std.ArrayList([:0]const u8) = .empty;
+            defer compute_shaders_list.deinit(arena_alloc);
+            if (@hasDecl(GraphicsAPI, "computeStateTextureOptions")) {
                 for (self.config.custom_shaders.value.items) |item| {
                     const path = switch (item) {
                         .optional => |p| p,
                         .required => |p| p,
                     };
 
-                    // Try to load a sibling MSL compute shader directly.
-                    // The file must be plain MSL (not GLSL) and contain a
-                    // kernel function named "computeMain".
                     const compute_msl = shadertoy.loadComputeMsl(
                         arena_alloc,
                         path,
@@ -1005,21 +1055,95 @@ pub fn Renderer(comptime GraphicsAPI: type) type {
                         }
                         continue;
                     };
-                    break :compute compute_msl;
+                    try compute_shaders_list.append(arena_alloc, compute_msl);
                 }
-                break :compute null;
-            };
+            }
 
             var shaders = try self.api.initShaders(
                 self.alloc,
                 custom_shaders,
-                compute_shader,
+                compute_shaders_list.items,
             );
             errdefer shaders.deinit(self.alloc);
 
             self.shaders = shaders;
             self.has_custom_shaders = has_custom_shaders;
-            self.has_compute_shader = compute_shader != null;
+            self.compute_shader_count = compute_shaders_list.items.len;
+
+            // Load input textures from files.
+            self.deinitInputTextures();
+            self.loadInputTextures();
+        }
+
+        fn loadInputTextures(self: *Self) void {
+            var count: usize = 0;
+            for (self.config.custom_shader_inputs.value.items) |item| {
+                if (count >= max_input_textures) break;
+
+                const path, const optional = switch (item) {
+                    .optional => |p| .{ p, true },
+                    .required => |p| .{ p, false },
+                };
+
+                const tex = loadInputTextureFromFile(self.alloc, &self.api, path) catch |err| {
+                    if (err == error.FileNotFound and optional) continue;
+                    log.warn("error loading input texture \"{s}\": {}", .{ path, err });
+                    continue;
+                };
+                log.info("loaded input texture path={s} (iChannel{})", .{ path, 5 + count });
+                self.input_textures[count] = tex;
+                count += 1;
+            }
+            self.input_texture_count = count;
+        }
+
+        fn loadInputTextureFromFile(
+            alloc: Allocator,
+            api: *GraphicsAPI,
+            path: []const u8,
+        ) !Texture {
+            const cwd = std.fs.cwd();
+            const file = try cwd.openFile(path, .{});
+            defer file.close();
+
+            const contents = try file.readToEndAlloc(alloc, std.math.maxInt(u32));
+            defer alloc.free(contents);
+
+            const file_type = switch (FileType.detect(contents)) {
+                .unknown => FileType.guessFromExtension(std.fs.path.extension(path)),
+                else => |t| t,
+            };
+
+            const image_data = switch (file_type) {
+                .png => try wuffs.png.decode(alloc, contents),
+                .jpeg => try wuffs.jpeg.decode(alloc, contents),
+                else => return error.UnsupportedImageFormat,
+            };
+            defer alloc.free(image_data.data);
+
+            // Use dedicated input texture options (rgba8unorm) if available,
+            // otherwise fall back to the standard texture options.
+            const opts = if (@hasDecl(GraphicsAPI, "inputTextureOptions"))
+                api.inputTextureOptions()
+            else
+                api.textureOptions();
+
+            return try Texture.init(
+                opts,
+                @intCast(image_data.width),
+                @intCast(image_data.height),
+                image_data.data,
+            );
+        }
+
+        fn deinitInputTextures(self: *Self) void {
+            for (&self.input_textures) |*tex| {
+                if (tex.*) |t| {
+                    t.deinit();
+                    tex.* = null;
+                }
+            }
+            self.input_texture_count = 0;
         }
 
         /// This is called early right after surface creation.
@@ -1118,7 +1242,7 @@ pub fn Renderer(comptime GraphicsAPI: type) type {
             self.swap_chain = try SwapChain.init(
                 self.api,
                 self.has_custom_shaders,
-                self.has_compute_shader,
+                self.compute_shader_count,
             );
             self.reinitialize_shaders = false;
             self.target_config_modified = 1;
@@ -1833,33 +1957,39 @@ pub fn Renderer(comptime GraphicsAPI: type) type {
                 // Sync our uniforms.
                 try state.uniforms.sync(&.{self.custom_shader_uniforms});
 
-                // Run compute pass BEFORE the render pass if we have a compute
-                // shader. This updates the simulation state textures so the
-                // fragment shader can read fresh state via iChannel2.
+                // Run compute passes BEFORE the render pass. Each compute kernel
+                // updates its own state texture pair. Kernels dispatch in order
+                // so kernel N can see kernel N-1's fresh output.
                 // Guard with comptime checks — only Metal has computePass and
-                // compute_pipeline. On other backends this compiles to nothing.
+                // compute_pipelines. On other backends this compiles to nothing.
                 if (comptime @hasDecl(@TypeOf(frame_ctx), "computePass") and
-                    @hasField(Shaders, "compute_pipeline"))
+                    @hasField(Shaders, "compute_pipelines"))
                 {
-                    if (self.has_compute_shader) {
-                        if (self.shaders.compute_pipeline) |cp| {
-                            if (frame.compute_shader_state) |*cs| {
+                    if (self.compute_shader_count > 0) {
+                        if (frame.compute_shader_state) |*cs| {
+                            for (self.shaders.compute_pipelines[0..@min(self.compute_shader_count, cs.pair_count)], 0..) |cp, ki| {
+                                // Build read textures: terminal, gap, feedback, compute states, input textures.
+                                // Bindings: 0=iChannel0, 1=skip, 2=iChannel1, 3-5=compute, 6-7=inputs
+                                var textures_read: [8]?Texture = .{null} ** 8;
+                                textures_read[0] = state.back_texture;  // iChannel0
+                                // [1] = null (Globals UBO gap)
+                                textures_read[2] = state.feedback_texture; // iChannel1
+                                for (0..cs.pair_count) |pi| {
+                                    textures_read[3 + pi] = cs.pairs[pi].state_read; // iChannel2+
+                                }
+                                for (0..self.input_texture_count) |ti| {
+                                    textures_read[6 + ti] = self.input_textures[ti];
+                                }
+
                                 frame_ctx.computePass(.{
                                     .pipeline = cp,
-                                    // iChannel0 (terminal) at index 0,
-                                    // iChannel1 (feedback) at index 2,
-                                    // previous state_read at index 3.
-                                    .textures_read = &.{
-                                        state.back_texture,
-                                        null,
-                                        state.feedback_texture,
-                                        cs.state_read,
-                                    },
-                                    .state_write = cs.state_write,
-                                    .width  = frame.target.width,
+                                    .textures_read = &textures_read,
+                                    .state_write = cs.pairs[ki].state_write,
+                                    .state_write_index = 8 + ki,
+                                    .width = frame.target.width,
                                     .height = frame.target.height,
                                 });
-                                cs.swap();
+                                cs.pairs[ki].swap();
                             }
                         }
                     }
@@ -1877,25 +2007,39 @@ pub fn Renderer(comptime GraphicsAPI: type) type {
                     }});
                     defer pass.complete();
 
-                    // Build texture list: iChannel0=terminal, skip binding 1 (Globals UBO),
-                    // iChannel1=feedback at binding 2, iChannel2=compute state at binding 3.
-                    const compute_state_read: ?Texture = if (frame.compute_shader_state) |cs|
-                        cs.state_read
-                    else
-                        null;
+                    // Build texture list for all iChannels:
+                    //   0 = iChannel0 (terminal), 1 = skip (Globals UBO),
+                    //   2 = iChannel1 (feedback), 3-5 = iChannel2-4 (compute states),
+                    //   6-7 = iChannel5-6 (file input textures).
+                    var textures: [8]?Texture = .{null} ** 8;
+                    textures[0] = state.back_texture;      // binding 0 = iChannel0
+                    textures[2] = state.feedback_texture;   // binding 2 = iChannel1
+                    if (frame.compute_shader_state) |cs| {
+                        for (0..cs.pair_count) |pi| {
+                            textures[3 + pi] = cs.pairs[pi].state_read;
+                        }
+                    }
+                    for (0..self.input_texture_count) |ti| {
+                        textures[6 + ti] = self.input_textures[ti];
+                    }
+
+                    var samplers: [8]?Sampler = .{null} ** 8;
+                    samplers[0] = state.sampler;
+                    samplers[2] = state.sampler;
+                    if (frame.compute_shader_state) |cs| {
+                        for (0..cs.pair_count) |pi| {
+                            samplers[3 + pi] = state.sampler;
+                        }
+                    }
+                    for (0..self.input_texture_count) |ti| {
+                        samplers[6 + ti] = state.sampler;
+                    }
 
                     pass.step(.{
                         .pipeline = pipeline,
                         .uniforms = state.uniforms.buffer,
-                        .textures = &.{
-                            state.back_texture,    // binding 0 = iChannel0 (terminal)
-                            null,                  // binding 1 = reserved (Globals UBO)
-                            state.feedback_texture, // binding 2 = iChannel1 (display feedback)
-                            compute_state_read,    // binding 3 = iChannel2 (compute state)
-                        },
-                        .samplers = &.{
-                            state.sampler, null, state.sampler, state.sampler,
-                        },
+                        .textures = &textures,
+                        .samplers = &samplers,
                         .draw = .{
                             .type = .triangle,
                             .vertex_count = 3,

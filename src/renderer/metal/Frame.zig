@@ -115,8 +115,10 @@ pub const ComputeArgs = struct {
     pipeline: ComputePipeline,
     /// Read-only textures bound at Metal indices 0, 1, 2, ...
     textures_read: []const ?Texture,
-    /// The single write-only state texture, bound at index 8.
+    /// The single write-only state texture.
     state_write: Texture,
+    /// Metal texture index for the write target (8 for first kernel, 9 for second, etc.).
+    state_write_index: usize = 8,
     /// Dispatch dimensions in pixels.
     width: usize,
     height: usize,
@@ -142,10 +144,10 @@ pub inline fn computePass(self: *const Self, args: ComputeArgs) void {
         }
     }
 
-    // Bind the writable state texture at index 8 (well above any sampled inputs).
+    // Bind the writable state texture at the specified index (well above any sampled inputs).
     encoder.msgSend(void, objc.sel("setTexture:atIndex:"), .{
         args.state_write.texture.value,
-        @as(c_ulong, 8),
+        @as(c_ulong, args.state_write_index),
     });
 
     // Dispatch: cover every pixel with 16×16 threadgroups.
