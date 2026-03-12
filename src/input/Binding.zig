@@ -668,6 +668,14 @@ pub const Action = union(enum) {
     /// Note that not all changes can be applied at runtime.
     reload_config,
 
+    /// Set a per-surface custom shader override. The parameter is the path to
+    /// a GLSL shader file. An empty string clears the override and restores the
+    /// global config shader.
+    ///
+    /// Example: `set_shader:/path/to/shader.glsl`
+    /// Example (clear): `set_shader:`
+    set_shader: []const u8,
+
     /// Close the current "surface", whether that is a window, tab, split, etc.
     ///
     /// This might trigger a close confirmation popup, depending on the value
@@ -1360,6 +1368,7 @@ pub const Action = union(enum) {
             .deactivate_key_table,
             .deactivate_all_key_tables,
             .end_key_sequence,
+            .set_shader,
             .crash,
             => .surface,
 

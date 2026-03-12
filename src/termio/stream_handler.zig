@@ -322,6 +322,7 @@ pub const StreamHandler = struct {
             .clipboard_contents => try self.clipboardContents(value.kind, value.data),
             .semantic_prompt => try self.semanticPrompt(value),
             .mouse_shape => try self.setMouseShape(value),
+            .set_shader => try self.setShader(value.path),
             .configure_charset => self.configureCharset(value.slot, value.charset),
             .set_attribute => {
                 @branchHint(.likely);
@@ -1034,6 +1035,11 @@ pub const StreamHandler = struct {
 
         self.terminal.mouse_shape = shape;
         self.surfaceMessageWriter(.{ .set_mouse_shape = shape });
+    }
+
+    fn setShader(self: *StreamHandler, path: []const u8) !void {
+        const req = try apprt.surface.Message.WriteReq.init(self.alloc, path);
+        self.surfaceMessageWriter(.{ .set_shader = req });
     }
 
     fn clipboardContents(self: *StreamHandler, kind: u8, data: []const u8) !void {

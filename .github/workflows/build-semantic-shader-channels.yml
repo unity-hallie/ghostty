@@ -1,0 +1,85 @@
+name: Build Semantic Shader Channels Branch
+
+on:
+  push:
+    branches: [feature/semantic-shader-channels]
+  workflow_dispatch:
+
+jobs:
+  build-macos-release:
+    name: Build (ReleaseLocal)
+    runs-on: macos-26
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Install Nix
+        uses: DeterminateSystems/nix-installer-action@main
+        with:
+          determinate: true
+
+      - name: Select Xcode 26
+        run: |
+          sudo xcode-select -s /Applications/Xcode_26.2.app || sudo xcode-select -s /Applications/Xcode_26.app
+          xcodebuild -version
+
+      - name: Get Zig deps via Nix
+        id: deps
+        run: nix build -L .#deps && echo "deps=$(readlink ./result)" >> $GITHUB_OUTPUT
+
+      - name: Build GhosttyKit
+        run: nix develop -c zig build --system ${{ steps.deps.outputs.deps }} -Demit-macos-app=false -Doptimize=ReleaseFast
+
+      - name: Build Ghostty.app (ReleaseLocal)
+        run: |
+          cd macos && xcodebuild \
+            -target Ghostty \
+            -configuration ReleaseLocal \
+            CODE_SIGN_IDENTITY="-" \
+            CODE_SIGNING_REQUIRED=NO \
+            CODE_SIGNING_ALLOWED=NO
+
+      - name: Upload Ghostty.app (ReleaseLocal)
+        uses: actions/upload-artifact@v4
+        with:
+          name: Ghostty-semantic-shader-channels-release
+          path: macos/build/ReleaseLocal/Ghostty.app
+
+  build-macos-debug:
+    name: Build (Debug)
+    runs-on: macos-26
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Install Nix
+        uses: DeterminateSystems/nix-installer-action@main
+        with:
+          determinate: true
+
+      - name: Select Xcode 26
+        run: |
+          sudo xcode-select -s /Applications/Xcode_26.2.app || sudo xcode-select -s /Applications/Xcode_26.app
+          xcodebuild -version
+
+      - name: Get Zig deps via Nix
+        id: deps
+        run: nix build -L .#deps && echo "deps=$(readlink ./result)" >> $GITHUB_OUTPUT
+
+      - name: Build GhosttyKit
+        run: nix develop -c zig build --system ${{ steps.deps.outputs.deps }} -Demit-macos-app=false -Doptimize=Debug
+
+      - name: Build Ghostty.app (Debug)
+        run: |
+          cd macos && xcodebuild \
+            -target Ghostty \
+            -configuration Debug \
+            CODE_SIGN_IDENTITY="-" \
+            CODE_SIGNING_REQUIRED=NO \
+            CODE_SIGNING_ALLOWED=NO
+
+      - name: Upload Ghostty.app (Debug)
+        uses: actions/upload-artifact@v4
+        with:
+          name: Ghostty-semantic-shader-channels-debug
+          path: macos/build/Debug/Ghostty.app

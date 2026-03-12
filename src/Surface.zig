@@ -137,6 +137,11 @@ config: DerivedConfig,
 /// is sent whenever this changes.
 config_conditional_state: configpkg.ConditionalState,
 
+/// An optional per-surface shader path that overrides the global config.
+/// Owned by this surface; null means use the global config shader.
+/// Preserved across config reloads.
+shader_override: ?[]u8 = null,
+
 /// This is set to true if our IO thread notifies us our child exited.
 /// This is used to determine if we need to confirm, hold open, etc.
 child_exited: bool = false,
@@ -819,6 +824,7 @@ pub fn deinit(self: *Surface) void {
     if (self.renderer_state.preedit) |p| self.alloc.free(p.codepoints);
     self.alloc.destroy(self.renderer_state.mutex);
     self.config.deinit();
+    if (self.shader_override) |s| self.alloc.free(s);
 
     log.info("surface closed addr={x}", .{@intFromPtr(self)});
 }
@@ -1056,6 +1062,26 @@ pub fn handleMessage(self: *Surface, msg: Message) !void {
                 .pwd,
                 .{ .pwd = str },
             );
+        },
+
+        .set_shader => |w| {
+            defer w.deinit();
+            const path = w.slice();
+
+            // Free any existing override.
+            if (self.shader_override) |s| self.alloc.free(s);
+
+            if (path.len == 0) {
+                // Empty path clears the override.
+                self.shader_override = null;
+                log.debug("cleared per-surface shader override", .{});
+            } else {
+                self.shader_override = try self.alloc.dupe(u8, path);
+                log.debug("set per-surface shader override path={s}", .{self.shader_override.?});
+            }
+
+            // Re-derive and push config so the renderer picks up the change.
+            try self.notifyShaderOverride();
         },
 
         .close => self.close(),
@@ -1675,6 +1701,38 @@ fn updateScrollbar(self: *Surface, scrollbar: terminal.Scrollbar) void {
     };
 }
 
+/// Called after `shader_override` changes to push a new renderer config.
+/// Triggers a soft config reload so `updateConfig` runs and patches the
+/// override into the renderer's DerivedConfig.
+fn notifyShaderOverride(self: *Surface) !void {
+    _ = try self.rt_app.performAction(
+        .{ .surface = self },
+        .reload_config,
+        .{ .soft = true },
+    );
+}
+
+/// Patches `custom_shaders` in a renderer change_config message to contain
+/// only the given override path. The override is allocated into the message's
+/// own arena so lifetime is correct.
+fn applyShaderOverrideToMessage(
+    self: *Surface,
+    msg: *rendererpkg.Message,
+    override_path: []const u8,
+) !void {
+    const impl = msg.change_config.impl;
+    const alloc = impl.arena.allocator();
+
+    // Free the existing custom_shaders list items.
+    impl.custom_shaders.value.deinit(alloc);
+    impl.custom_shaders = .{};
+
+    // Build a single required Path pointing at the override.
+    const duped = try alloc.dupe(u8, override_path);
+    const path: configpkg.Path = .{ .required = duped };
+    try impl.custom_shaders.value.append(alloc, path);
+}
+
 /// This should be called anytime `config_conditional_state` changes
 /// so that the apprt can reload the configuration.
 fn notifyConfigConditionalState(self: *Surface) void {
@@ -1760,6 +1818,13 @@ pub fn updateConfig(
     // our messages aren't huge.
     var renderer_message = try rendererpkg.Message.initChangeConfig(self.alloc, config);
     errdefer renderer_message.deinit();
+
+    // If this surface has a per-surface shader override, patch it into the
+    // renderer config now so it survives global config reloads.
+    if (self.shader_override) |override_path| {
+        try self.applyShaderOverrideToMessage(&renderer_message, override_path);
+    }
+
     var termio_config_ptr = try self.alloc.create(termio.Termio.DerivedConfig);
     errdefer self.alloc.destroy(termio_config_ptr);
     termio_config_ptr.* = try termio.Termio.DerivedConfig.init(self.alloc, config);
@@ -5883,6 +5948,21 @@ pub fn performBindingAction(self: *Surface, action: input.Binding.Action) !bool 
             // will do that because leaf keys (keys with bindings) aren't
             // in the queued encoding list.
             self.endKeySequence(.flush, .retain);
+        },
+
+        .set_shader => |path| {
+            // Free any existing override.
+            if (self.shader_override) |s| self.alloc.free(s);
+
+            if (path.len == 0) {
+                self.shader_override = null;
+                log.debug("keybind: cleared per-surface shader override", .{});
+            } else {
+                self.shader_override = try self.alloc.dupe(u8, path);
+                log.debug("keybind: set per-surface shader override path={s}", .{self.shader_override.?});
+            }
+
+            try self.notifyShaderOverride();
         },
 
         .crash => |location| switch (location) {

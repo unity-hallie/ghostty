@@ -108,6 +108,11 @@ pub const Message = union(enum) {
     /// Selected search index change
     search_selected: ?usize,
 
+    /// Override the custom shader for this surface only. The value is a
+    /// null-terminated path to a GLSL shader file. An empty (zero-length)
+    /// string clears the override and restores the global config shader.
+    set_shader: WriteReq,
+
     pub const ReportTitleStyle = enum {
         csi_21_t,
 

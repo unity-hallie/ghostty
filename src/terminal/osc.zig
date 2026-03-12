@@ -153,6 +153,14 @@ pub const Command = union(Key) {
     /// Kitty text sizing protocol (OSC 66)
     kitty_text_sizing: parsers.kitty_text_sizing.OSC,
 
+    /// OSC 7727. Ghostty-specific: set the custom shader for this surface
+    /// only. The value is a path to a GLSL shader file. An empty string
+    /// clears the per-surface override and restores the global config shader.
+    set_shader: struct {
+        /// Path to the shader file, or empty to clear the override.
+        value: [:0]const u8,
+    },
+
     pub const SemanticPrompt = parsers.semantic_prompt.Command;
 
     pub const Key = LibEnum(
@@ -182,6 +190,7 @@ pub const Command = union(Key) {
             "conemu_xterm_emulation",
             "conemu_comment",
             "kitty_text_sizing",
+            "set_shader",
         },
     );
 
@@ -341,6 +350,8 @@ pub const Parser = struct {
         @"133",
         @"777",
         @"1337",
+        @"772",
+        @"7727",
     };
 
     pub fn init(alloc: ?Allocator) Parser {
@@ -591,7 +602,18 @@ pub const Parser = struct {
             },
 
             .@"77" => switch (c) {
+                '2' => self.state = .@"772",
                 '7' => self.state = .@"777",
+                else => self.state = .invalid,
+            },
+
+            .@"772" => switch (c) {
+                '7' => self.state = .@"7727",
+                else => self.state = .invalid,
+            },
+
+            .@"7727" => switch (c) {
+                ';' => self.writeToFixed(),
                 else => self.state = .invalid,
             },
 
@@ -681,12 +703,15 @@ pub const Parser = struct {
             .@"66" => parsers.kitty_text_sizing.parse(self, terminator_ch),
 
             .@"77" => null,
+            .@"772" => null,
 
             .@"133" => parsers.semantic_prompt.parse(self, terminator_ch),
 
             .@"777" => parsers.rxvt_extension.parse(self, terminator_ch),
 
             .@"1337" => parsers.iterm2.parse(self, terminator_ch),
+
+            .@"7727" => parsers.set_shader.parse(self, terminator_ch),
         };
     }
 };

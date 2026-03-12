@@ -126,6 +126,7 @@ pub const Action = union(Key) {
     kitty_color_report: kitty.color.OSC,
     color_operation: ColorOperation,
     semantic_prompt: SemanticPrompt,
+    set_shader: SetShader,
 
     pub const Key = lib.Enum(
         lib_target,
@@ -223,6 +224,7 @@ pub const Action = union(Key) {
             "kitty_color_report",
             "color_operation",
             "semantic_prompt",
+            "set_shader",
         },
     );
 
@@ -319,6 +321,17 @@ pub const Action = union(Key) {
 
         pub fn cval(self: WindowTitle) WindowTitle.C {
             return .init(self.title);
+        }
+    };
+
+    pub const SetShader = struct {
+        /// Path to the shader file, or empty to clear the per-surface override.
+        path: []const u8,
+
+        pub const C = lib.String;
+
+        pub fn cval(self: SetShader) SetShader.C {
+            return .init(self.path);
         }
     };
 
@@ -2035,6 +2048,10 @@ pub fn Stream(comptime Handler: type) type {
 
                 .conemu_progress_report => |v| {
                     try self.handler.vt(.progress_report, v);
+                },
+
+                .set_shader => |v| {
+                    try self.handler.vt(.set_shader, .{ .path = v.value });
                 },
 
                 .conemu_sleep,
